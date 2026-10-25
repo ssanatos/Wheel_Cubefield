@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+<title>핸들 큐브필드</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0b1a;overflow:hidden;touch-action:none;
+    -webkit-user-select:none;user-select:none;font-family:system-ui,sans-serif}
+  canvas{display:block;width:100%;height:100%}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, DPR;
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+const MAX_ANG = Math.PI * 0.75;   // 휠 최대 회전각
+const FIELD = 45;                 // 좌우 경계
+const VIEW = 320;                 // 시야 거리
+const CAM_H = 3.2;
+const ITEMS = { ice:'🍦', poo:'💩' };
+
+const PULL_RANGE = 80;
+let active = null, activeDir = 0;
+let state = 'ready';              // ready | play | over
+let px, pz, speed, t, ang, objs, nextZ, effect, msg, msgT, best;
+try { best = parseFloat(localStorage.getItem('wheelCubeBest')) || 0; } catch(e){ best = 0; }
+
+function reset(){
+  px = 0; pz = 0; speed = 32; t = 0; ang = 0;
+  objs = []; nextZ = 70; effect = { dir:0, left:0 }; msg = ''; msgT = 0;
+}
+reset();
+
+function spawnRows(){
+  while (nextZ < pz + VIEW + 40){
+    const n = 2 + Math.floor(Math.random() * 3) + Math.floor(speed / 70);
+    for (let i = 0; i < n; i++){
+      objs.push({ k:'cube', x:(Math.random()*2-1)*(FIELD+12), z:nextZ + Math.random()*6,
+                  s:3 + Math.random()*1.6, h:Math.floor(Math.random()*40) + 170 });
+    }
+    if (Math.random() < 0.45){
+      const r = Math.random();
+      objs.push({ k: r < .38 ? 'coin' : r < .62 ? 'ice' : 'poo',
+                  x:(Math.random()*2-1)*(FIELD-6), z:nextZ + 3 + Math.random()*4, sgn:Math.random()<.5?-1:1 });
+    }
+    nextZ += Math.max(9, 22 - speed / 9);
+  }
+}
+
+// ---------- 입력 ----------
+const keys = {};
+addEventListener('keydown', e => {
+  if (['ArrowLeft','ArrowRight','Space',' '].includes(e.key) || e.code === 'Space') e.preventDefault();
+  keys[e.key] = true;
+  if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') start();
+});
+addEventListener('keyup', e => keys[e.key] = false);
+
+let dragging = false, lastA = 0;
+const wheelC = () => ({ x: W/2, y: H - Math.min(W, H) * 0.24, r: Math.min(W, H) * 0.22 });
+const pAng = e => { const c = wheelC(); return Math.atan2(e.clientY - c.y, e.clientX - c.x); };
+cv.addEventListener('pointerdown', e => {
+  if (state !== 'play'){ start(); return; }
+  dragging = true; lastA = pAng(e); cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const a = pAng(e);
+  let d = a - lastA;
+  while (d > Math.PI) d -= 2*Math.PI;
+  while (d < -Math.PI) d += 2*Math.PI;
+  ang += d; lastA = a;
+});
+const endDrag = () => dragging = false;
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+
+function start(){ reset(); state = 'play'; }
+
+function flash(text){ msg = text; msgT = 1.4; }
+
+// ---------- 업데이트 ----------
+function update(dt){
+  if (state !== 'play') return;
+  t += dt;
+  speed = Math.min(150, 32 + t * 0.8);
+
+  // 키 입력
+  const L = keys['ArrowLeft'] || keys['a'] || keys['A'];
+  const R = keys['ArrowRight'] || keys['d'] || keys['D'];
+  if (L) ang -= 2.8 * dt;
+  if (R) ang += 2.8 * dt;
+
+  // 가장 가까운 아이템만 휠을 돌린다 (동전/아이스크림: 그쪽, 똥: 반대쪽)
+  active = null; let bestD = 1e9;
+  for (const o of objs){
+    if (o.k === 'cube') continue;
+    const dz = o.z - pz;
+    if (dz < -4 || dz > PULL_RANGE) continue;
+    const d = Math.hypot(o.x - px, dz);
+    if (d < bestD && d < PULL_RANGE){ bestD = d; active = o; }
+  }
+  activeDir = 0;
+  if (active){
+    const side = Math.abs(active.x - px) < 0.5 ? active.sgn : Math.sign(active.x - px);
+    activeDir = active.k === 'poo' ? -side : side;
+    ang += activeDir * 0.8 * (1 - bestD / PULL_RANGE) * dt + activeDir * 0.2 * dt;
+  }
+  if (!L && !R && !dragging && !active) ang -= Math.sign(ang) * Math.min(Math.abs(ang), 0.7 * dt); // 서서히 복귀
+  ang = Math.max(-MAX_ANG, Math.min(MAX_ANG, ang));
+
+  px += (ang / MAX_ANG) * speed * 0.55 * dt;
+  if (px > FIELD){ px = FIELD; if (ang > 0) ang *= 0.9; }
+  if (px < -FIELD){ px = -FIELD; if (ang < 0) ang *= 0.9; }
+  pz += speed * dt;
+
+  spawnRows();
+
+  for (let i = objs.length - 1; i >= 0; i--){
+    const o = objs[i];
+    if (o.z < pz - 8){ objs.splice(i, 1); continue; }
+    if (o.k === 'cube'){
+      if (Math.abs(px - o.x) < o.s/2 + 0.7 && pz > o.z - 1 && pz < o.z + o.s){
+        state = 'over';
+        if (t > best){ best = t; try { localStorage.setItem('wheelCubeBest', best); } catch(e){} }
+      }
+    }
+  }
+  if (msgT > 0) msgT -= dt;
+}
+
+// ---------- 렌더 ----------
+const F = () => Math.max(W, H) * 0.75;
+function proj(x, y, dz){
+  const f = F();
+  return [W/2 + (x - px) * f / dz, H * 0.4 + (CAM_H - y) * f / dz];
+}
+function shade(h, l, a){ return `hsla(${h},70%,${l}%,${a})`; }
+
+function drawCube(o){
+  const dz = o.z - pz;
+  if (dz < 0.8 || dz > VIEW) return;
+  const a = Math.min(1, (VIEW - dz) / 90);
+  const x0 = o.x - o.s/2, x1 = o.x + o.s/2;
+  const [fl, fb] = proj(x0, 0, dz), [fr, ft] = proj(x1, o.s, dz);
+  const [bl, bb] = proj(x0, o.s, dz + o.s), [br] = proj(x1, o.s, dz + o.s);
+  // 윗면
+  ctx.fillStyle = shade(o.h, 62, a);
+  ctx.beginPath(); ctx.moveTo(fl, ft); ctx.lineTo(fr, ft); ctx.lineTo(br, bb); ctx.lineTo(bl, bb); ctx.closePath(); ctx.fill();
+  // 옆면 (플레이어 쪽에서 보이는 쪽)
+  if (px < x0){
+    const [sl, sb] = proj(x0, 0, dz + o.s);
+    ctx.fillStyle = shade(o.h, 38, a);
+    ctx.beginPath(); ctx.moveTo(fl, fb); ctx.lineTo(fl, ft); ctx.lineTo(bl, bb); ctx.lineTo(sl, sb); ctx.closePath(); ctx.fill();
+  } else if (px > x1){
+    const [sr, sb] = proj(x1, 0, dz + o.s);
+    ctx.fillStyle = shade(o.h, 38, a);
+    ctx.beginPath(); ctx.moveTo(fr, fb); ctx.lineTo(fr, ft); ctx.lineTo(br, bb); ctx.lineTo(sr, sb); ctx.closePath(); ctx.fill();
+  }
+  // 앞면
+  ctx.fillStyle = shade(o.h, 50, a);
+  ctx.fillRect(fl, ft, fr - fl, fb - ft);
+}
+
+function drawItem(o){
+  const dz = o.z - pz;
+  if (dz < 0.8 || dz > VIEW) return;
+  const [sx, sy] = proj(o.x, 0, dz);
+  const size = 3.2 * F() / dz;
+  ctx.globalAlpha = Math.min(1, (VIEW - dz) / 90);
+  if (o === active){
+    ctx.strokeStyle = o.k === 'poo' ? '#ff7a7a' : '#7affb0'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(sx, sy, size*0.7, size*0.22, 0, 0, Math.PI*2); ctx.stroke();
+  }
+  if (o.k === 'coin'){
+    const r = size * 0.4, cy = sy - r * 1.1;
+    ctx.fillStyle = '#e9b100'; ctx.beginPath(); ctx.arc(sx, cy, r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#b07d00'; ctx.lineWidth = Math.max(1, r*0.15);
+    ctx.stroke();
+    ctx.fillStyle = '#ffd84a'; ctx.beginPath(); ctx.arc(sx, cy, r*0.68, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#b07d00'; ctx.font = `bold ${r*1.1}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('$', sx, cy + r*0.05);
+    ctx.globalAlpha = 1; return;
+  }
+  ctx.font = `${size}px serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  ctx.fillText(ITEMS[o.k], sx, sy);
+  ctx.globalAlpha = 1;
+}
+
+function drawWheel(){
+  const c = wheelC();
+  ctx.save();
+  ctx.translate(c.x, c.y + c.r * 0.35);
+  ctx.rotate(ang);
+  ctx.globalAlpha = 0.85;
+  ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = c.r * 0.2;
+  ctx.beginPath(); ctx.arc(0, 0, c.r, 0, Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = '#555'; ctx.lineWidth = c.r * 0.05;
+  ctx.beginPath(); ctx.arc(0, 0, c.r * 1.09, 0, Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = '#2b2b2b'; ctx.lineWidth = c.r * 0.12;
+  for (let i = 0; i < 3; i++){
+    const a = i * Math.PI * 2 / 3 + Math.PI / 2;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * c.r, Math.sin(a) * c.r); ctx.stroke();
+  }
+  ctx.fillStyle = '#444';
+  ctx.beginPath(); ctx.arc(0, 0, c.r * 0.2, 0, Math.PI*2); ctx.fill();
+  // 12시 방향 표시
+  ctx.fillStyle = '#e33';
+  ctx.fillRect(-c.r * 0.05, -c.r * 1.12, c.r * 0.1, c.r * 0.22);
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+function text(s, x, y, size, color, align){
+  ctx.font = `bold ${size}px system-ui,sans-serif`;
+  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = size * 0.12; ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.strokeText(s, x, y);
+  ctx.fillStyle = color || '#fff'; ctx.fillText(s, x, y);
+}
+
+function render(){
+  const hor = H * 0.4;
+  const g = ctx.createLinearGradient(0, 0, 0, hor);
+  g.addColorStop(0, '#1b2a6b'); g.addColorStop(1, '#6a8fe0');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, hor);
+  const gg = ctx.createLinearGradient(0, hor, 0, H);
+  gg.addColorStop(0, '#2c5a3a'); gg.addColorStop(1, '#173323');
+  ctx.fillStyle = gg; ctx.fillRect(0, hor, W, H - hor);
+
+  // 바닥 줄무늬(속도감)
+  ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = 1;
+  const step = 20, startZ = Math.ceil((pz + 2) / step) * step;
+  for (let z = startZ; z < pz + VIEW; z += step){
+    const y = proj(0, 0, z - pz)[1];
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  // 경계선
+  ctx.strokeStyle = 'rgba(255,220,80,.6)'; ctx.lineWidth = 2;
+  for (const ex of [-FIELD - 4, FIELD + 4]){
+    const a = proj(ex, 0, 1.5), b = proj(ex, 0, VIEW);
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+  }
+
+  // 먼 것부터 그리기
+  const vis = objs.filter(o => o.z > pz && o.z < pz + VIEW).sort((a, b) => b.z - a.z);
+  for (const o of vis) o.k === 'cube' ? drawCube(o) : drawItem(o);
+
+  drawWheel();
+
+  // HUD
+  text(t.toFixed(2) + 's', W/2, 34, 30);
+  text('속도 ' + Math.round(speed), 16, 34, 16, '#cde', 'left');
+  text('최고 ' + best.toFixed(2) + 's', W - 16, 34, 16, '#cde', 'right');
+  if (active){
+    const toward = activeDir > 0 ? '오른쪽 →' : '← 왼쪽';
+    text((active.k === 'poo' ? '💩 밀어냄 ' : '끌어당김 ') + toward, W/2, H * 0.2, 20, active.k === 'poo' ? '#ff9a9a' : '#9affc0');
+  }
+  if (msgT > 0){ ctx.globalAlpha = Math.min(1, msgT); text(msg, W/2, H * 0.22, 22, '#ffe27a'); ctx.globalAlpha = 1; }
+
+  if (state === 'ready'){
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0, 0, W, H);
+    text('핸들 큐브필드', W/2, H*0.28, 40);
+    text('← → 방향키 / 화면에서 휠 돌리기', W/2, H*0.28 + 56, 18, '#dde');
+    text('$ 🍦 : 가까이 가면 휠이 그쪽으로 틀어짐', W/2, H*0.28 + 90, 18, '#dde');
+    text('💩 : 가까이 가면 휠이 반대로 틀어짐', W/2, H*0.28 + 120, 18, '#dde');
+    text('탭 또는 스페이스로 시작', W/2, H*0.28 + 175, 22, '#ffe27a');
+  } else if (state === 'over'){
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0, 0, W, H);
+    text('충돌!', W/2, H*0.3, 44, '#ff6b6b');
+    text(t.toFixed(2) + '초 생존', W/2, H*0.3 + 56, 28);
+    if (t >= best && t > 0) text('🏆 신기록!', W/2, H*0.3 + 96, 20, '#ffe27a');
+    text('탭 또는 스페이스로 다시 시작', W/2, H*0.3 + 140, 20, '#dde');
+  }
+}
+
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
